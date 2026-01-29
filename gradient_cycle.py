@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-GUI tool to generate a solid-color cycling test video.
+GUI tool to generate gradient-based color-cycling test videos.
 
-Inputs:
-- Output filename
-- Length (minutes + seconds)
-- Resolution dropdown (common presets or custom width/height)
+Behavior:
+- Every ~2.5s a random 0-255 RGB target and random gradient direction are chosen.
+- Gradients blend between targets; frames add together with uint8 wraparound
+  (overflow is intentional to create bright flashes).
+
+Inputs via a Tkinter UI: filename, length (minutes/seconds), resolution dropdown
+(with custom), and FPS.
 
 Requires: Python 3, numpy, ffmpeg on PATH.
 """
 
-import colorsys
 import math
 import subprocess
 import sys
@@ -31,10 +33,33 @@ PRESETS = {
 }
 
 
-def hsv_to_rgb_uint8(h: float, s: float, v: float) -> Tuple[int, int, int]:
-    """Convert HSV (0-1 floats) to 0-255 RGB tuple."""
-    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-    return int(r * 255), int(g * 255), int(b * 255)
+def random_color(rng: np.random.Generator) -> np.ndarray:
+    # uint16 to allow accumulation before wrap
+    return rng.integers(0, 256, size=3, dtype=np.uint16)
+
+
+def random_cardinal_dir(rng: np.random.Generator) -> float:
+    """Return a direction in radians: up, down, left, or right."""
+    return rng.choice([0.0, math.pi / 2, math.pi, 3 * math.pi / 2])
+
+
+def make_gradient_map(width: int, height: int, direction: float, color: np.ndarray) -> np.ndarray:
+    """
+    Create a color gradient for a given direction (radians) and target color.
+    Gradient goes from black to color along the direction; values in float32.
+    """
+    # Centered coordinates preserve direction (0 vs 180 are distinct).
+    x = np.linspace(-0.5, 0.5, width, dtype=np.float32)
+    y = np.linspace(-0.5, 0.5, height, dtype=np.float32)
+    xx, yy = np.meshgrid(x, y)
+    dx = math.cos(direction)
+    dy = math.sin(direction)
+    proj = xx * dx + yy * dy  # range roughly [-sqrt(0.5), +sqrt(0.5)]
+    max_r = math.sqrt(0.5)
+    proj = (proj + max_r) / (2 * max_r + 1e-6)  # normalize to 0..1 while keeping direction
+    proj = np.clip(proj, 0.0, 1.0)
+    grad = proj[..., None] * color.astype(np.float32)
+    return grad  # float32 (H, W, 3)
 
 
 def generate_video(
@@ -46,7 +71,13 @@ def generate_video(
     status_var: tk.StringVar,
     button: ttk.Button,
 ) -> None:
+    if "." not in filename:
+        filename += ".mp4"
+
     total_frames = int(math.ceil(total_seconds * fps))
+    segment_seconds = 4.0  # slower changes to observe direction clearly
+    segment_frames = max(1, int(segment_seconds * fps))
+
     cmd = [
         "ffmpeg",
         "-y",
@@ -76,12 +107,28 @@ def generate_video(
         button.state(["!disabled"])
         return
 
+    rng = np.random.default_rng()
+    accumulator = np.zeros((height, width, 3), dtype=np.uint16)
+
+    current_color = random_color(rng)
+    next_color = random_color(rng)
+    current_dir = random_cardinal_dir(rng)
+    current_grad = make_gradient_map(width, height, current_dir, current_color)
     try:
         for frame_idx in range(total_frames):
-            hue = (frame_idx % fps) / fps + frame_idx / total_frames
-            hue %= 1.0
-            r, g, b = hsv_to_rgb_uint8(hue, 1.0, 1.0)
-            frame = np.full((height, width, 3), (r, g, b), dtype=np.uint8)
+            seg_pos = frame_idx % segment_frames
+            if seg_pos == 0 and frame_idx != 0:
+                current_color = next_color
+                next_color = random_color(rng)
+                current_dir = random_cardinal_dir(rng)
+                current_grad = make_gradient_map(width, height, current_dir, current_color)
+                # additive between segments, but constant during segment
+                accumulator = accumulator + current_grad.astype(np.uint16)
+            elif frame_idx == 0:
+                # first segment: add once
+                accumulator = accumulator + current_grad.astype(np.uint16)
+
+            frame = (accumulator & 0xFF).astype(np.uint8)
             proc.stdin.write(frame.tobytes())
     except Exception as exc:  # noqa: BLE001
         status_var.set(f"Error: {exc}")
@@ -91,8 +138,7 @@ def generate_video(
         proc.wait()
 
     if proc.returncode == 0:
-        minutes = total_seconds / 60
-        status_var.set(f"Done: {minutes:.2f} min -> {filename}")
+        status_var.set(f"Done: {total_seconds:.1f}s -> {filename}")
     else:
         status_var.set(f"ffmpeg exited with {proc.returncode}")
     button.state(["!disabled"])
@@ -104,6 +150,7 @@ def start_generation(
     seconds_var: tk.StringVar,
     width_var: tk.StringVar,
     height_var: tk.StringVar,
+    fps_var: tk.StringVar,
     preset_var: tk.StringVar,
     status_var: tk.StringVar,
     button: ttk.Button,
@@ -111,13 +158,17 @@ def start_generation(
     try:
         minutes = float(minutes_var.get() or 0)
         seconds = float(seconds_var.get() or 0)
+        fps = float(fps_var.get() or 0)
     except ValueError:
-        status_var.set("Length must be numbers.")
+        status_var.set("Length/FPS must be numbers.")
         return
 
     total_seconds = minutes * 60 + seconds
     if total_seconds <= 0:
         status_var.set("Length must be greater than zero.")
+        return
+    if fps <= 0:
+        status_var.set("FPS must be positive.")
         return
 
     preset = preset_var.get()
@@ -141,15 +192,14 @@ def start_generation(
             return
         width, height = dims
 
-    filename = filename_var.get().strip() or "color_cycle.mp4"
-    fps = 30
+    filename = filename_var.get().strip() or "gradient_cycle.mp4"
 
     status_var.set("Rendering… this may take a while.")
     button.state(["disabled"])
 
     thread = threading.Thread(
         target=generate_video,
-        args=(filename, total_seconds, width, height, fps, status_var, button),
+        args=(filename, total_seconds, width, height, int(fps), status_var, button),
         daemon=True,
     )
     thread.start()
@@ -164,14 +214,15 @@ def toggle_custom_fields(*_, preset_var: tk.StringVar, custom_frame: ttk.Frame) 
 
 def build_ui() -> None:
     root = tk.Tk()
-    root.title("Color Cycle Video Generator")
+    root.title("Gradient Cycle Video Generator")
 
-    filename_var = tk.StringVar(value="color_cycle_4k.mp4")
+    filename_var = tk.StringVar(value="gradient_cycle.mp4")
     minutes_var = tk.StringVar(value="1")
     seconds_var = tk.StringVar(value="0")
-    preset_var = tk.StringVar(value="4K UHD (3840x2160)")
+    preset_var = tk.StringVar(value="1080p (1920x1080)")
     width_var = tk.StringVar(value="1920")
     height_var = tk.StringVar(value="1080")
+    fps_var = tk.StringVar(value="30")
     status_var = tk.StringVar(value="Idle")
 
     main = ttk.Frame(root, padding=16)
@@ -202,6 +253,9 @@ def build_ui() -> None:
     ttk.Entry(custom_frame, width=6, textvariable=height_var).grid(row=0, column=3, padx=4)
     custom_frame.state(["disabled"])
 
+    ttk.Label(main, text="FPS").grid(row=4, column=0, sticky="w")
+    ttk.Entry(main, width=6, textvariable=fps_var).grid(row=4, column=1, sticky="w")
+
     button = ttk.Button(
         main,
         text="Generate",
@@ -211,15 +265,16 @@ def build_ui() -> None:
             seconds_var,
             width_var,
             height_var,
+            fps_var,
             preset_var,
             status_var,
             button,
         ),
     )
-    button.grid(row=4, column=0, columnspan=2, pady=(12, 4))
+    button.grid(row=5, column=0, columnspan=2, pady=(12, 4))
 
     ttk.Label(main, textvariable=status_var, foreground="blue").grid(
-        row=5, column=0, columnspan=2, sticky="w"
+        row=6, column=0, columnspan=2, sticky="w"
     )
 
     preset_var.trace_add("write", lambda *_: toggle_custom_fields(preset_var=preset_var, custom_frame=custom_frame))
