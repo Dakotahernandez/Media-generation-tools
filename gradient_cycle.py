@@ -3,9 +3,8 @@
 GUI tool to generate gradient-based color-cycling test videos.
 
 Behavior:
-- Every ~2.5s a random 0-255 RGB target and random gradient direction are chosen.
-- Gradients blend between targets; frames add together with uint8 wraparound
-  (overflow is intentional to create bright flashes).
+- Uses multiple moving sine-wave gradients with random colors/directions.
+- Waves overlap additively each frame (uint8 wrap for bright, fast motion).
 
 Inputs via a Tkinter UI: filename, length (minutes/seconds), resolution dropdown
 (with custom), and FPS.
@@ -13,13 +12,14 @@ Inputs via a Tkinter UI: filename, length (minutes/seconds), resolution dropdown
 Requires: Python 3, numpy, ffmpeg on PATH.
 """
 
+import colorsys
 import math
 import subprocess
 import sys
 import threading
 import tkinter as tk
 from tkinter import ttk
-from typing import Tuple
+from typing import List
 
 import numpy as np
 
@@ -33,33 +33,8 @@ PRESETS = {
 }
 
 
-def random_color(rng: np.random.Generator) -> np.ndarray:
-    # uint16 to allow accumulation before wrap
-    return rng.integers(0, 256, size=3, dtype=np.uint16)
-
-
-def random_cardinal_dir(rng: np.random.Generator) -> float:
-    """Return a direction in radians: up, down, left, or right."""
-    return rng.choice([0.0, math.pi / 2, math.pi, 3 * math.pi / 2])
-
-
-def make_gradient_map(width: int, height: int, direction: float, color: np.ndarray) -> np.ndarray:
-    """
-    Create a color gradient for a given direction (radians) and target color.
-    Gradient goes from black to color along the direction; values in float32.
-    """
-    # Centered coordinates preserve direction (0 vs 180 are distinct).
-    x = np.linspace(-0.5, 0.5, width, dtype=np.float32)
-    y = np.linspace(-0.5, 0.5, height, dtype=np.float32)
-    xx, yy = np.meshgrid(x, y)
-    dx = math.cos(direction)
-    dy = math.sin(direction)
-    proj = xx * dx + yy * dy  # range roughly [-sqrt(0.5), +sqrt(0.5)]
-    max_r = math.sqrt(0.5)
-    proj = (proj + max_r) / (2 * max_r + 1e-6)  # normalize to 0..1 while keeping direction
-    proj = np.clip(proj, 0.0, 1.0)
-    grad = proj[..., None] * color.astype(np.float32)
-    return grad  # float32 (H, W, 3)
+class Wave:
+    __slots__ = ("dot_term", "temp_freq", "phase", "hue0", "hue_speed", "amp_scale")
 
 
 def generate_video(
@@ -75,8 +50,6 @@ def generate_video(
         filename += ".mp4"
 
     total_frames = int(math.ceil(total_seconds * fps))
-    segment_seconds = 4.0  # slower changes to observe direction clearly
-    segment_frames = max(1, int(segment_seconds * fps))
 
     cmd = [
         "ffmpeg",
@@ -108,27 +81,46 @@ def generate_video(
         return
 
     rng = np.random.default_rng()
-    accumulator = np.zeros((height, width, 3), dtype=np.uint16)
+    # Coordinate grids
+    x = np.linspace(-0.5, 0.5, width, dtype=np.float32)
+    y = np.linspace(-0.5, 0.5, height, dtype=np.float32)
+    xx, yy = np.meshgrid(x, y)
 
-    current_color = random_color(rng)
-    next_color = random_color(rng)
-    current_dir = random_cardinal_dir(rng)
-    current_grad = make_gradient_map(width, height, current_dir, current_color)
+    waves: List[Wave] = []
+    num_waves = 3
+    for _ in range(num_waves):
+        angle = rng.uniform(0.0, 2 * math.pi)
+        dx, dy = math.cos(angle), math.sin(angle)
+        spatial_cycles = rng.uniform(1.0, 6.0)  # cycles across the frame
+        temp_freq = rng.uniform(0.8, 4.0)  # Hz
+        phase = rng.uniform(0.0, 2 * math.pi)
+        hue0 = rng.random()
+        hue_speed = rng.uniform(0.05, 0.35)  # hue cycles per second
+        amp_scale = rng.uniform(0.5, 1.0)
+
+        dot = (xx * dx + yy * dy) * spatial_cycles
+        w = Wave()
+        w.dot_term = dot  # float32 (H, W)
+        w.temp_freq = temp_freq
+        w.phase = phase
+        w.hue0 = hue0
+        w.hue_speed = hue_speed
+        w.amp_scale = amp_scale
+        waves.append(w)
+
     try:
         for frame_idx in range(total_frames):
-            seg_pos = frame_idx % segment_frames
-            if seg_pos == 0 and frame_idx != 0:
-                current_color = next_color
-                next_color = random_color(rng)
-                current_dir = random_cardinal_dir(rng)
-                current_grad = make_gradient_map(width, height, current_dir, current_color)
-                # additive between segments, but constant during segment
-                accumulator = accumulator + current_grad.astype(np.uint16)
-            elif frame_idx == 0:
-                # first segment: add once
-                accumulator = accumulator + current_grad.astype(np.uint16)
-
-            frame = (accumulator & 0xFF).astype(np.uint8)
+            t = frame_idx / fps
+            accum = np.zeros((height, width, 3), dtype=np.float32)
+            for w in waves:
+                arg = 2 * math.pi * (w.dot_term + t * w.temp_freq) + w.phase
+                s = (np.sin(arg, dtype=np.float32) + 1.0) * 0.5  # 0..1
+                hue = (w.hue0 + t * w.hue_speed) % 1.0
+                r, g, b = colorsys.hsv_to_rgb(hue, 1.0, 1.0)
+                rgb = np.array([r, g, b], dtype=np.float32) * 255.0 * w.amp_scale
+                s = s[..., None] * rgb
+                accum += s
+            frame = (accum.astype(np.uint16) & 0xFF).astype(np.uint8)
             proc.stdin.write(frame.tobytes())
     except Exception as exc:  # noqa: BLE001
         status_var.set(f"Error: {exc}")
