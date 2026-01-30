@@ -1,3 +1,4 @@
 color_cycle_4k.mp4
 *.venv
 *.mp4
+.DS_Store
