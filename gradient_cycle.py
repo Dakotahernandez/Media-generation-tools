@@ -49,7 +49,8 @@ def generate_video(
     if "." not in filename:
         filename += ".mp4"
 
-    total_frames = int(math.ceil(total_seconds * fps))
+    dup_factor = 5  # duplicate each generated frame this many times
+    target_frames = int(math.ceil(total_seconds * fps))
 
     cmd = [
         "ffmpeg",
@@ -109,8 +110,10 @@ def generate_video(
         waves.append(w)
 
     try:
-        for frame_idx in range(total_frames):
-            t = frame_idx / fps
+        frames_written = 0
+        logical_index = 0
+        while frames_written < target_frames:
+            t = frames_written / fps  # time corresponding to first duplicate
             accum = np.zeros((height, width, 3), dtype=np.float32)
             for w in waves:
                 arg = 2 * math.pi * (w.dot_term + t * w.temp_freq) + w.phase
@@ -121,7 +124,11 @@ def generate_video(
                 s = s[..., None] * rgb
                 accum += s
             frame = (accum.astype(np.uint16) & 0xFF).astype(np.uint8)
-            proc.stdin.write(frame.tobytes())
+            repeat = min(dup_factor, target_frames - frames_written)
+            for _ in range(repeat):
+                proc.stdin.write(frame.tobytes())
+            frames_written += repeat
+            logical_index += 1
     except Exception as exc:  # noqa: BLE001
         status_var.set(f"Error: {exc}")
     finally:
