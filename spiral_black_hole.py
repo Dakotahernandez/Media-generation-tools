@@ -21,6 +21,8 @@ Requires: Python 3, numpy, ffmpeg on PATH.
 import math
 import subprocess
 import sys
+import tkinter as tk
+from tkinter import ttk, messagebox
 from typing import Tuple
 
 import numpy as np
@@ -66,33 +68,17 @@ def hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
     return rgb
 
 
-def main() -> None:
-    try:
-        filename = input("Output filename [spiral_black_hole.mp4]: ").strip() or "spiral_black_hole.mp4"
-        if "." not in filename:
-            filename += ".mp4"
-        minutes = ask_float("Length minutes [0]: ", 0.0, 0.0)
-        seconds = ask_float("Length seconds [10]: ", 10.0, 0.0)
-        width = ask_int("Width [1920]: ", 1920, 1)
-        height = ask_int("Height [1080]: ", 1080, 1)
-        fps = ask_int("FPS [30]: ", 30, 1)
-        dup_factor = ask_int("Frame duplicate factor [3]: ", 3, 1)
-        add_objects = ask_bool("Add random infalling objects?", default=False)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        sys.exit(1)
-
+def run(filename, minutes, seconds, width, height, fps, dup_factor, add_objects):
+    if "." not in filename:
+        filename += ".mp4"
+    filename = f"media/{filename}" if not filename.startswith("media/") else filename
     if width > 3840 or height > 2160:
-        print("Max resolution is 3840x2160.", file=sys.stderr)
-        sys.exit(1)
-
+        raise ValueError("Max resolution is 3840x2160.")
     total_seconds = minutes * 60 + seconds
     if total_seconds <= 0:
-        print("Length must be greater than zero.", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("Length must be greater than zero.")
 
     target_frames = int(math.ceil(total_seconds * fps))
-    logical_frames = math.ceil(target_frames / dup_factor)
 
     cmd = [
         "ffmpeg",
@@ -116,11 +102,7 @@ def main() -> None:
         filename,
     ]
 
-    try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    except FileNotFoundError:
-        print("ffmpeg not found on PATH. Install ffmpeg and try again.", file=sys.stderr)
-        sys.exit(1)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
 
     # Normalized, aspect-corrected coordinates centered at 0.
     x = np.linspace(-1.0, 1.0, width, dtype=np.float32)
@@ -226,17 +208,90 @@ def main() -> None:
                 proc.stdin.write(rgb.tobytes())
             frames_written += repeat
             logical_idx += 1
-    except Exception as exc:  # noqa: BLE001
-        print(f"Error: {exc}", file=sys.stderr)
     finally:
         if proc.stdin:
             proc.stdin.close()
         proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg exited with status {proc.returncode}")
 
-    if proc.returncode == 0:
-        print(f"Done. Saved {total_seconds:.1f}s video to {filename}")
+
+def cli():
+    try:
+        filename = input("Output filename [spiral_black_hole.mp4]: ").strip() or "spiral_black_hole.mp4"
+        minutes = ask_float("Length minutes [0]: ", 0.0, 0.0)
+        seconds = ask_float("Length seconds [10]: ", 10.0, 0.0)
+        width = ask_int("Width [1920]: ", 1920, 1)
+        height = ask_int("Height [1080]: ", 1080, 1)
+        fps = ask_int("FPS [30]: ", 30, 1)
+        dup_factor = ask_int("Frame duplicate factor [3]: ", 3, 1)
+        add_objects = ask_bool("Add random infalling objects?", default=False)
+        run(filename, minutes, seconds, width, height, fps, dup_factor, add_objects)
+        print("Done.")
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def ui():
+    root = tk.Tk()
+    root.title("Spiral Black Hole")
+    filename = tk.StringVar(value="media/spiral_black_hole.mp4")
+    minutes = tk.StringVar(value="0")
+    seconds = tk.StringVar(value="10")
+    width = tk.StringVar(value="1920")
+    height = tk.StringVar(value="1080")
+    fps = tk.StringVar(value="30")
+    dup = tk.StringVar(value="3")
+    add_objs = tk.BooleanVar(value=False)
+    status = tk.StringVar(value="Idle")
+
+    def go():
+        try:
+            run(
+                filename.get(),
+                float(minutes.get() or 0),
+                float(seconds.get() or 0),
+                int(width.get()),
+                int(height.get()),
+                int(fps.get()),
+                int(dup.get()),
+                add_objs.get(),
+            )
+            status.set("Done.")
+            messagebox.showinfo("Spiral Black Hole", "Finished")
+        except Exception as exc:
+            status.set(f"Error: {exc}")
+            messagebox.showerror("Spiral Black Hole", str(exc))
+
+    frm = ttk.Frame(root, padding=12)
+    frm.grid(row=0, column=0, sticky="nsew")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    def row(label, var, r, w=14):
+        ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=var, width=w).grid(row=r, column=1, sticky="w")
+
+    row("Output filename", filename, 0, 28)
+    row("Minutes", minutes, 1)
+    row("Seconds", seconds, 2)
+    row("Width", width, 3)
+    row("Height", height, 4)
+    row("FPS", fps, 5)
+    row("Dup factor", dup, 6)
+    ttk.Checkbutton(frm, text="Add infalling objects", variable=add_objs).grid(row=7, column=0, columnspan=2, sticky="w")
+    ttk.Button(frm, text="Generate", command=go).grid(row=8, column=0, columnspan=2, pady=8)
+    ttk.Label(frm, textvariable=status).grid(row=9, column=0, columnspan=2, sticky="w")
+    frm.columnconfigure(1, weight=1)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    if "--cli" in sys.argv:
+        cli()
     else:
-        print(f"ffmpeg exited with status {proc.returncode}", file=sys.stderr)
+        ui()
 
 
 if __name__ == "__main__":

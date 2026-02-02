@@ -191,7 +191,7 @@ def start_generation(
             return
         width, height = dims
 
-    filename = filename_var.get().strip() or "gradient_cycle.mp4"
+    filename = filename_var.get().strip() or "media/gradient_cycle.mp4"
 
     status_var.set("Rendering… this may take a while.")
     button.state(["disabled"])
@@ -215,7 +215,7 @@ def build_ui() -> None:
     root = tk.Tk()
     root.title("Gradient Cycle Video Generator")
 
-    filename_var = tk.StringVar(value="gradient_cycle.mp4")
+    filename_var = tk.StringVar(value="media/gradient_cycle.mp4")
     minutes_var = tk.StringVar(value="1")
     seconds_var = tk.StringVar(value="0")
     preset_var = tk.StringVar(value="1080p (1920x1080)")

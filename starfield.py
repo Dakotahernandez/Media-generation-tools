@@ -16,6 +16,9 @@ Requires: Python 3, numpy, ffmpeg on PATH.
 import math
 import subprocess
 import sys
+import threading
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
 
 import numpy as np
 
@@ -48,31 +51,16 @@ def hsv_to_rgb(h: np.ndarray, s: np.ndarray, v: np.ndarray) -> np.ndarray:
     return np.stack([r, g, b], axis=-1)
 
 
-def main() -> None:
-    try:
-        filename = input("Output filename [starfield.mp4]: ").strip() or "starfield.mp4"
-        if "." not in filename:
-            filename += ".mp4"
-        minutes = ask_float("Length minutes [0]: ", 0.0, 0.0)
-        seconds = ask_float("Length seconds [10]: ", 10.0, 0.0)
-        width = ask_int("Width [1920]: ", 1920, 1)
-        height = ask_int("Height [1080]: ", 1080, 1)
-        fps = ask_int("FPS [30]: ", 30, 1)
-        dup = ask_int("Frame duplicate factor [1]: ", 1, 1)
-        n_stars = ask_int("Number of stars [500]: ", 500, 1)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        sys.exit(1)
-
+def run(filename, minutes, seconds, width, height, fps, dup, n_stars):
     if width > 3840 or height > 2160:
-        print("Max resolution is 3840x2160.", file=sys.stderr)
-        sys.exit(1)
+        raise ValueError("Max resolution is 3840x2160.")
     total_seconds = minutes * 60 + seconds
     if total_seconds <= 0:
-        print("Length must be greater than zero.", file=sys.stderr)
-        sys.exit(1)
-
+        raise ValueError("Length must be greater than zero.")
     target_frames = int(math.ceil(total_seconds * fps))
+    if "." not in filename:
+        filename += ".mp4"
+    filename = f"media/{filename}" if not filename.startswith("media/") else filename
 
     cmd = [
         "ffmpeg",
@@ -96,30 +84,22 @@ def main() -> None:
         filename,
     ]
 
-    try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    except FileNotFoundError:
-        print("ffmpeg not found on PATH.", file=sys.stderr)
-        sys.exit(1)
-
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     rng = np.random.default_rng()
-
-    # Star properties
     x = rng.uniform(0, width, size=n_stars).astype(np.float32)
     y = rng.uniform(0, height, size=n_stars).astype(np.float32)
-    depth = rng.uniform(0.2, 1.0, size=n_stars).astype(np.float32)  # nearer == faster/brighter
-    speed = (60.0 + 340.0 * depth).astype(np.float32)  # px/s
-    hue = rng.random(size=n_stars).astype(np.float32) * 0.15  # slight color tint
+    depth = rng.uniform(0.2, 1.0, size=n_stars).astype(np.float32)
+    speed = (60.0 + 340.0 * depth).astype(np.float32)
+    hue = rng.random(size=n_stars).astype(np.float32) * 0.15
     sat = rng.uniform(0.0, 0.25, size=n_stars).astype(np.float32)
     val = (0.4 + 0.6 * depth).astype(np.float32)
-    size = rng.integers(1, 3, size=n_stars, dtype=np.int32)  # pixel size
+    size = rng.integers(1, 3, size=n_stars, dtype=np.int32)
 
     try:
         frames_written = 0
         while frames_written < target_frames:
-            # Update positions
             x -= speed / fps
-            wrap = x < -3  # allow small overshoot
+            wrap = x < -3
             if np.any(wrap):
                 count = int(np.count_nonzero(wrap))
                 x[wrap] = width + rng.uniform(0, 5, size=count)
@@ -132,8 +112,6 @@ def main() -> None:
                 size[wrap] = rng.integers(1, 3, size=count)
 
             frame = np.zeros((height, width, 3), dtype=np.uint8)
-
-            # Draw stars
             cols = x.astype(np.int32)
             rows = y.astype(np.int32)
             mask = (cols >= 0) & (cols < width) & (rows >= 0) & (rows < height)
@@ -142,8 +120,9 @@ def main() -> None:
             if cols.size:
                 rgb = hsv_to_rgb(hue[mask], sat[mask], val[mask]) * 255.0
                 rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+                sizes = size[mask]
                 for i in range(cols.size):
-                    s = size[mask][i]
+                    s = sizes[i]
                     r0 = max(0, rows[i] - s)
                     r1 = min(height, rows[i] + s + 1)
                     c0 = max(0, cols[i] - s)
@@ -158,12 +137,84 @@ def main() -> None:
         if proc.stdin:
             proc.stdin.close()
         proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg exited with status {proc.returncode}")
 
-    if proc.returncode == 0:
-        print(f"Done. Saved {total_seconds:.2f}s to {filename}")
-    else:
-        print(f"ffmpeg exited with status {proc.returncode}", file=sys.stderr)
+
+def cli():
+    try:
+        filename = input("Output filename [starfield.mp4]: ").strip() or "starfield.mp4"
+        minutes = ask_float("Length minutes [0]: ", 0.0, 0.0)
+        seconds = ask_float("Length seconds [10]: ", 10.0, 0.0)
+        width = ask_int("Width [1920]: ", 1920, 1)
+        height = ask_int("Height [1080]: ", 1080, 1)
+        fps = ask_int("FPS [30]: ", 30, 1)
+        dup = ask_int("Frame duplicate factor [1]: ", 1, 1)
+        n_stars = ask_int("Number of stars [500]: ", 500, 1)
+        run(filename, minutes, seconds, width, height, fps, dup, n_stars)
+        print("Done.")
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def ui():
+    root = tk.Tk()
+    root.title("Starfield")
+    filename = tk.StringVar(value="media/starfield.mp4")
+    minutes = tk.StringVar(value="0")
+    seconds = tk.StringVar(value="10")
+    width = tk.StringVar(value="1920")
+    height = tk.StringVar(value="1080")
+    fps = tk.StringVar(value="30")
+    dup = tk.StringVar(value="1")
+    nstars = tk.StringVar(value="500")
+    status = tk.StringVar(value="Idle")
+
+    def go():
+        try:
+            run(
+                filename.get(),
+                float(minutes.get() or 0),
+                float(seconds.get() or 0),
+                int(width.get()),
+                int(height.get()),
+                int(fps.get()),
+                int(dup.get()),
+                int(nstars.get()),
+            )
+            status.set("Done.")
+            messagebox.showinfo("Starfield", "Finished")
+        except Exception as exc:
+            status.set(f"Error: {exc}")
+            messagebox.showerror("Starfield", str(exc))
+
+    frm = ttk.Frame(root, padding=12)
+    frm.grid(row=0, column=0, sticky="nsew")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    def row(label, var, r, w=14):
+        ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=var, width=w).grid(row=r, column=1, sticky="w")
+
+    row("Output filename", filename, 0, 26)
+    row("Minutes", minutes, 1)
+    row("Seconds", seconds, 2)
+    row("Width", width, 3)
+    row("Height", height, 4)
+    row("FPS", fps, 5)
+    row("Dup factor", dup, 6)
+    row("# Stars", nstars, 7)
+
+    ttk.Button(frm, text="Generate", command=go).grid(row=8, column=0, columnspan=2, pady=8)
+    ttk.Label(frm, textvariable=status).grid(row=9, column=0, columnspan=2, sticky="w")
+    frm.columnconfigure(1, weight=1)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    if "--cli" in sys.argv:
+        cli()
+    else:
+        ui()

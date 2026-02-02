@@ -2,3 +2,11 @@ color_cycle_4k.mp4
 *.venv
 *.mp4
 .DS_Store
+
+media/
+media/*.mp4
+media/*.mov
+media/*.mkv
+media/*.png
+media/*.jpg
+media/*.webm

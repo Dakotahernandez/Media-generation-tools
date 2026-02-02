@@ -166,7 +166,7 @@ def build_ui() -> None:
     root = tk.Tk()
     root.title("Color Cycle Video Generator")
 
-    filename_var = tk.StringVar(value="color_cycle_4k.mp4")
+    filename_var = tk.StringVar(value="media/color_cycle_4k.mp4")
     minutes_var = tk.StringVar(value="1")
     seconds_var = tk.StringVar(value="0")
     preset_var = tk.StringVar(value="4K UHD (3840x2160)")

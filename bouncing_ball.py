@@ -12,6 +12,9 @@ Features:
 import math
 import subprocess
 import sys
+import threading
+import tkinter as tk
+from tkinter import ttk, messagebox
 from typing import Tuple
 
 import numpy as np
@@ -37,33 +40,17 @@ def random_color(rng: np.random.Generator) -> np.ndarray:
     return rng.integers(60, 256, size=3, dtype=np.uint8)
 
 
-def main() -> None:
-    try:
-        filename = input("Output filename [bouncing_ball.mp4]: ").strip() or "bouncing_ball.mp4"
-        if "." not in filename:
-            filename += ".mp4"
-        minutes = ask_float("Length minutes [0]: ", 0.0, 0.0)
-        seconds = ask_float("Length seconds [10]: ", 10.0, 0.0)
-        width = ask_int("Width [1920]: ", 1920, 1)
-        height = ask_int("Height [1080]: ", 1080, 1)
-        fps = ask_int("FPS [30]: ", 30, 1)
-        dup = ask_int("Frame duplicate factor [1]: ", 1, 1)
-        radius = ask_int("Ball radius px [40]: ", 40, 2)
-        speed = ask_float("Speed px/sec [450]: ", 450.0, 1.0)
-    except ValueError as exc:
-        print(exc, file=sys.stderr)
-        sys.exit(1)
-
+def run(filename, minutes, seconds, width, height, fps, dup, radius, speed):
     if width > 3840 or height > 2160:
-        print("Max resolution is 3840x2160.", file=sys.stderr)
-        sys.exit(1)
-
+        raise ValueError("Max resolution is 3840x2160.")
     total_seconds = minutes * 60 + seconds
     if total_seconds <= 0:
-        print("Length must be greater than zero.", file=sys.stderr)
-        sys.exit(1)
-
+        raise ValueError("Length must be greater than zero.")
     target_frames = int(math.ceil(total_seconds * fps))
+    if "." not in filename:
+        filename += ".mp4"
+    if not filename.startswith("media/"):
+        filename = f"media/{filename}"
 
     cmd = [
         "ffmpeg",
@@ -86,16 +73,9 @@ def main() -> None:
         "18",
         filename,
     ]
-
-    try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-    except FileNotFoundError:
-        print("ffmpeg not found on PATH.", file=sys.stderr)
-        sys.exit(1)
-
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     rng = np.random.default_rng()
 
-    # Initial state
     x = rng.uniform(radius, width - radius)
     y = rng.uniform(radius, height - radius)
     angle = rng.uniform(0, 2 * math.pi)
@@ -103,7 +83,6 @@ def main() -> None:
     vy = math.sin(angle) * speed
     color = random_color(rng)
 
-    # Precompute circle mask offsets
     diam = 2 * radius + 1
     yy, xx = np.ogrid[-radius : radius + 1, -radius : radius + 1]
     mask = xx * xx + yy * yy <= radius * radius
@@ -114,10 +93,8 @@ def main() -> None:
     try:
         frames_written = 0
         while frames_written < target_frames:
-            # Physics step
             x += vx / fps
             y += vy / fps
-
             bounced = False
             if x < radius:
                 x = radius
@@ -135,7 +112,6 @@ def main() -> None:
                 y = height - radius
                 vy = -abs(vy)
                 bounced = True
-
             if bounced:
                 color = random_color(rng)
 
@@ -154,12 +130,89 @@ def main() -> None:
         if proc.stdin:
             proc.stdin.close()
         proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg exited with status {proc.returncode}")
 
-    if proc.returncode == 0:
-        print(f"Done. Saved {total_seconds:.2f}s to {filename}")
-    else:
-        print(f"ffmpeg exited with status {proc.returncode}", file=sys.stderr)
+
+def cli():
+    try:
+        filename = input("Output filename [bouncing_ball.mp4]: ").strip() or "bouncing_ball.mp4"
+        minutes = ask_float("Length minutes [0]: ", 0.0, 0.0)
+        seconds = ask_float("Length seconds [10]: ", 10.0, 0.0)
+        width = ask_int("Width [1920]: ", 1920, 1)
+        height = ask_int("Height [1080]: ", 1080, 1)
+        fps = ask_int("FPS [30]: ", 30, 1)
+        dup = ask_int("Frame duplicate factor [1]: ", 1, 1)
+        radius = ask_int("Ball radius px [40]: ", 40, 2)
+        speed = ask_float("Speed px/sec [450]: ", 450.0, 1.0)
+        run(filename, minutes, seconds, width, height, fps, dup, radius, speed)
+        print("Done.")
+    except Exception as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def ui():
+    root = tk.Tk()
+    root.title("Bouncing Ball")
+
+    filename = tk.StringVar(value="media/bouncing_ball.mp4")
+    minutes = tk.StringVar(value="0")
+    seconds = tk.StringVar(value="10")
+    width = tk.StringVar(value="1920")
+    height = tk.StringVar(value="1080")
+    fps = tk.StringVar(value="30")
+    dup = tk.StringVar(value="1")
+    radius = tk.StringVar(value="40")
+    speed = tk.StringVar(value="450")
+    status = tk.StringVar(value="Idle")
+
+    def go():
+        try:
+            run(
+                filename.get(),
+                float(minutes.get() or 0),
+                float(seconds.get() or 0),
+                int(width.get()),
+                int(height.get()),
+                int(fps.get()),
+                int(dup.get()),
+                int(radius.get()),
+                float(speed.get()),
+            )
+            status.set("Done.")
+            messagebox.showinfo("Bouncing Ball", "Finished")
+        except Exception as exc:
+            status.set(f"Error: {exc}")
+            messagebox.showerror("Bouncing Ball", str(exc))
+
+    frm = ttk.Frame(root, padding=12)
+    frm.grid(row=0, column=0, sticky="nsew")
+    root.columnconfigure(0, weight=1)
+    root.rowconfigure(0, weight=1)
+
+    def row(label, var, r, w=12):
+        ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w")
+        ttk.Entry(frm, textvariable=var, width=w).grid(row=r, column=1, sticky="w")
+
+    row("Output filename", filename, 0, 24)
+    row("Minutes", minutes, 1)
+    row("Seconds", seconds, 2)
+    row("Width", width, 3)
+    row("Height", height, 4)
+    row("FPS", fps, 5)
+    row("Dup factor", dup, 6)
+    row("Radius", radius, 7)
+    row("Speed px/s", speed, 8, 14)
+
+    ttk.Button(frm, text="Generate", command=go).grid(row=9, column=0, columnspan=2, pady=8)
+    ttk.Label(frm, textvariable=status).grid(row=10, column=0, columnspan=2, sticky="w")
+    frm.columnconfigure(1, weight=1)
+    root.mainloop()
 
 
 if __name__ == "__main__":
-    main()
+    if "--cli" in sys.argv:
+        cli()
+    else:
+        ui()
