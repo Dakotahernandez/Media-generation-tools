@@ -22,6 +22,7 @@ TOOLS = [
     ("Upscale Video", "upscale_video.py"),
     ("Upscale Image", "upscale_image.py"),
     ("Batch Runner", "batch_runner.py"),
+    ("Pipeline Runner", "pipeline_runner.py"),
 ]
 
 
